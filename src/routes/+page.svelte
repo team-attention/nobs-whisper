@@ -12,6 +12,8 @@
     downloadProgress?: number;
     localPath?: string;
     description: string;
+    category: string;
+    url: string;
   }
 
   interface AppConfig {
@@ -54,6 +56,37 @@
   ];
 
   let selectedModelInfo = $derived(models.find(m => m.id === config.selectedModel));
+
+  // Group models by category
+  let modelsByCategory = $derived(() => {
+    const categories = new Map<string, ModelInfo[]>();
+    const order = ["Official", "Distil-Whisper", "Quantized"];
+
+    for (const model of models) {
+      const cat = model.category || "Other";
+      if (!categories.has(cat)) {
+        categories.set(cat, []);
+      }
+      categories.get(cat)!.push(model);
+    }
+
+    // Sort by predefined order
+    const sorted = new Map<string, ModelInfo[]>();
+    for (const cat of order) {
+      if (categories.has(cat)) {
+        sorted.set(cat, categories.get(cat)!);
+        categories.delete(cat);
+      }
+    }
+    // Add any remaining categories
+    for (const [cat, models] of categories) {
+      sorted.set(cat, models);
+    }
+
+    return sorted;
+  });
+
+  let expandedCategories = $state<Set<string>>(new Set(["Official"]));
 
   onMount(() => {
     isTauri = checkIsTauri();
@@ -333,49 +366,73 @@
 
         {#if modelExpanded}
           <div class="model-list">
-            {#each models as model}
-              <div
-                class="model-item"
-                class:selected={model.id === config.selectedModel}
-                class:downloading={downloadingModel === model.id}
-                class:deleting={deletingModel === model.id}
-              >
-                {#if downloadingModel === model.id}
-                  <div class="download-progress-bar" style="width: {downloadProgress}%"></div>
-                {/if}
+            {#each [...modelsByCategory()] as [category, categoryModels]}
+              <div class="category-section">
                 <button
-                  class="model-info"
-                  onclick={() => model.status === "downloaded" && selectModel(model.id)}
-                  disabled={model.status !== "downloaded" || deletingModel === model.id}
+                  class="category-header"
+                  onclick={() => {
+                    const newSet = new Set(expandedCategories);
+                    if (newSet.has(category)) {
+                      newSet.delete(category);
+                    } else {
+                      newSet.add(category);
+                    }
+                    expandedCategories = newSet;
+                  }}
                 >
-                  <span class="model-name">{model.name}</span>
-                  <span class="model-size">{formatSize(model.size)}</span>
+                  <span class="category-chevron" class:expanded={expandedCategories.has(category)}>▶</span>
+                  <span class="category-name">{category}</span>
+                  <span class="category-count">{categoryModels.length}</span>
                 </button>
-                <div class="model-actions">
-                  {#if deletingModel === model.id}
-                    <span class="model-status">Deleting...</span>
-                  {:else if model.status === "downloaded"}
-                    {#if model.id === config.selectedModel}
-                      <span class="model-badge">Selected</span>
-                    {/if}
-                    <button
-                      class="btn-action delete"
-                      onclick={() => deleteModel(model.id)}
-                    >
-                      Delete
-                    </button>
-                  {:else if downloadingModel === model.id}
-                    <span class="model-progress">{downloadProgress.toFixed(0)}%</span>
-                  {:else}
-                    <button
-                      class="btn-action download"
-                      onclick={() => downloadModel(model.id)}
-                      disabled={downloadingModel !== null}
-                    >
-                      Download
-                    </button>
-                  {/if}
-                </div>
+                {#if expandedCategories.has(category)}
+                  <div class="category-models">
+                    {#each categoryModels as model}
+                      <div
+                        class="model-item"
+                        class:selected={model.id === config.selectedModel}
+                        class:downloading={downloadingModel === model.id}
+                        class:deleting={deletingModel === model.id}
+                      >
+                        {#if downloadingModel === model.id}
+                          <div class="download-progress-bar" style="width: {downloadProgress}%"></div>
+                        {/if}
+                        <button
+                          class="model-info"
+                          onclick={() => model.status === "downloaded" && selectModel(model.id)}
+                          disabled={model.status !== "downloaded" || deletingModel === model.id}
+                        >
+                          <span class="model-name">{model.name}</span>
+                          <span class="model-size">{formatSize(model.size)}</span>
+                        </button>
+                        <div class="model-actions">
+                          {#if deletingModel === model.id}
+                            <span class="model-status">Deleting...</span>
+                          {:else if model.status === "downloaded"}
+                            {#if model.id === config.selectedModel}
+                              <span class="model-badge">Selected</span>
+                            {/if}
+                            <button
+                              class="btn-action delete"
+                              onclick={() => deleteModel(model.id)}
+                            >
+                              Delete
+                            </button>
+                          {:else if downloadingModel === model.id}
+                            <span class="model-progress">{downloadProgress.toFixed(0)}%</span>
+                          {:else}
+                            <button
+                              class="btn-action download"
+                              onclick={() => downloadModel(model.id)}
+                              disabled={downloadingModel !== null}
+                            >
+                              Download
+                            </button>
+                          {/if}
+                        </div>
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
               </div>
             {/each}
           </div>
@@ -539,6 +596,57 @@
 
   .model-list {
     border-top: 1px solid #e0e0e0;
+  }
+
+  .category-section {
+    border-bottom: 1px solid #e0e0e0;
+  }
+
+  .category-section:last-child {
+    border-bottom: none;
+  }
+
+  .category-header {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: #f8f8f8;
+    border: none;
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #666;
+    text-align: left;
+  }
+
+  .category-header:hover {
+    background: #f0f0f0;
+  }
+
+  .category-chevron {
+    font-size: 8px;
+    transition: transform 0.2s;
+  }
+
+  .category-chevron.expanded {
+    transform: rotate(90deg);
+  }
+
+  .category-name {
+    flex: 1;
+  }
+
+  .category-count {
+    font-weight: 400;
+    color: #999;
+  }
+
+  .category-models {
+    /* Container for models within a category */
   }
 
   .model-item {
@@ -778,6 +886,19 @@
 
     .model-list {
       border-color: #3a3a3c;
+    }
+
+    .category-section {
+      border-color: #3a3a3c;
+    }
+
+    .category-header {
+      background: #2a2a2c;
+      color: #999;
+    }
+
+    .category-header:hover {
+      background: #3a3a3c;
     }
 
     .model-item {
