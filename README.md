@@ -6,7 +6,7 @@ Tired of wrapper apps charging $10/month for OpenAI's **free** Whisper model? Sa
 
 ## Download
 
-**[Download Latest Release](https://github.com/eatnug/nobs-whisper/releases/latest)**
+**[Download Latest Release](https://github.com/team-attention/nobs-whisper/releases/latest)**
 
 ## How to Use
 
