@@ -1,0 +1,52 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Nobs Whisper",
+  "version": "0.1.4",
+  "identifier": "com.nobswhisper.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build && cd NobsWhisperIndicator && swift build -c release",
+    "frontendDist": "../build"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "title": "Nobs Whisper Settings",
+        "width": 600,
+        "height": 500,
+        "visible": false,
+        "resizable": true,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": [
+      "../NobsWhisperIndicator/.build/release/NobsWhisperIndicator"
+    ],
+    "macOS": {
+      "entitlements": "entitlements.plist",
+      "exceptionDomain": "",
+      "frameworks": [],
+      "providerShortName": null,
+      "signingIdentity": "Developer ID Application: Jacob Park (D86BXTY5VR)",
+      "minimumSystemVersion": "10.15",
+      "infoPlist": "Info.plist"
+    }
+  },
+  "plugins": {}
+}

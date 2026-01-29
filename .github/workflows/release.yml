@@ -1,0 +1,140 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: macos-14  # Apple Silicon runner
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'src-tauri -> target'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Apple certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          CERTIFICATE_PATH=$RUNNER_TEMP/certificate.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+
+          echo -n "$APPLE_CERTIFICATE" | base64 --decode -o $CERTIFICATE_PATH
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+          security import $CERTIFICATE_PATH -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+
+      - name: Build Swift Indicator (Universal)
+        run: |
+          cd NobsWhisperIndicator
+          swift build -c release --arch arm64 --arch x86_64
+          mkdir -p .build/release
+          cp .build/apple/Products/Release/NobsWhisperIndicator .build/release/NobsWhisperIndicator
+
+      - name: Build Tauri App (without signing)
+        run: npm run tauri build -- --target universal-apple-darwin
+        env:
+          TAURI_CLI_CONFIG: '{"build":{"beforeBuildCommand":"npm run build"}}'
+
+      - name: Sign all binaries and app
+        env:
+          APPLE_SIGNING_IDENTITY: "Developer ID Application: Jacob Park (D86BXTY5VR)"
+        run: |
+          APP_PATH="src-tauri/target/universal-apple-darwin/release/bundle/macos/Nobs Whisper.app"
+          ENTITLEMENTS="src-tauri/entitlements.plist"
+
+          # Sign the Swift indicator binary inside the app bundle
+          find "$APP_PATH" -name "NobsWhisperIndicator" -type f | while read binary; do
+            codesign --force --options runtime --sign "$APPLE_SIGNING_IDENTITY" --timestamp "$binary"
+          done
+
+          # Re-sign the main app with entitlements
+          codesign --force --deep --options runtime --sign "$APPLE_SIGNING_IDENTITY" --timestamp --entitlements "$ENTITLEMENTS" "$APP_PATH"
+
+          # Verify
+          codesign --verify --deep --strict "$APP_PATH"
+
+      - name: Notarize app
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          APP_PATH="src-tauri/target/universal-apple-darwin/release/bundle/macos/Nobs Whisper.app"
+          ZIP_PATH="src-tauri/target/universal-apple-darwin/release/bundle/macos/NobsWhisper.zip"
+
+          # Create zip for notarization
+          ditto -c -k --keepParent "$APP_PATH" "$ZIP_PATH"
+
+          # Submit for notarization
+          xcrun notarytool submit "$ZIP_PATH" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+
+          # Staple the ticket
+          xcrun stapler staple "$APP_PATH"
+
+      - name: Create DMG
+        run: |
+          APP_PATH="src-tauri/target/universal-apple-darwin/release/bundle/macos/Nobs Whisper.app"
+          DMG_PATH="src-tauri/target/universal-apple-darwin/release/bundle/macos/NobsWhisper_${{ github.ref_name }}_universal.dmg"
+
+          hdiutil create -volname "Nobs Whisper" -srcfolder "$APP_PATH" -ov -format UDZO "$DMG_PATH"
+
+          # Sign the DMG
+          codesign --force --sign "Developer ID Application: Jacob Park (D86BXTY5VR)" --timestamp "$DMG_PATH"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: 'Nobs Whisper ${{ github.ref_name }}'
+          body: |
+            ## What's Changed
+
+            See the [README](https://github.com/${{ github.repository }}/blob/main/README.md) for features and usage.
+
+            ## Installation
+
+            1. Download the `.dmg` file below
+            2. Open the DMG and drag Nobs Whisper to Applications
+            3. Open Nobs Whisper from Applications
+            4. Grant Microphone and Accessibility permissions when prompted
+            5. Download a Whisper model from the app
+            6. Set your preferred hotkey and start transcribing!
+
+            > **Note**: Apple Silicon (M1/M2/M3) recommended for best performance.
+          files: |
+            src-tauri/target/universal-apple-darwin/release/bundle/macos/NobsWhisper_${{ github.ref_name }}_universal.dmg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

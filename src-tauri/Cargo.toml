@@ -1,0 +1,49 @@
+[package]
+name = "nobs-whisper"
+version = "0.1.4"
+description = "Local Whisper Voice Typing App for macOS"
+authors = ["eatnug"]
+edition = "2021"
+
+[lib]
+name = "nobs_whisper_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
+tauri-plugin-opener = "2"
+tauri-plugin-global-shortcut = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Audio recording
+cpal = "0.15"
+rubato = "0.15"
+
+# Whisper inference
+whisper-rs = { version = "0.15", features = ["metal"] }
+
+# Text input simulation
+enigo = "0.3"
+arboard = "3.4"
+
+# Async runtime & HTTP client
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["stream"] }
+futures-util = "0.3"
+
+# Utilities
+dirs = "5"
+thiserror = "2"
+log = "0.4"
+env_logger = "0.11"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.26"
+objc = "0.2"
+core-foundation = "0.10"
+core-graphics = "0.24"
+block = "0.1"
