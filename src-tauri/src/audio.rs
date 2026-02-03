@@ -21,19 +21,98 @@ pub enum AudioError {
 /// Audio buffer that can be shared across threads
 pub struct AudioBuffer {
     samples: Vec<f32>,
+    /// Position of the last non-silent sample (for real-time silence detection)
+    last_speech_pos: usize,
+    /// Sample rate for silence detection calculations
+    sample_rate: u32,
 }
 
 impl AudioBuffer {
     pub fn new() -> Self {
-        Self { samples: Vec::new() }
+        Self::with_sample_rate(48000) // Default to common input sample rate
+    }
+
+    pub fn with_sample_rate(sample_rate: u32) -> Self {
+        Self {
+            samples: Vec::new(),
+            last_speech_pos: 0,
+            sample_rate,
+        }
     }
 
     pub fn push_samples(&mut self, samples: &[f32]) {
+        let start_pos = self.samples.len();
         self.samples.extend_from_slice(samples);
+
+        // Check if new samples contain speech (non-silent audio)
+        let window_size = (self.sample_rate / 100) as usize; // 10ms windows
+        for (i, chunk) in samples.chunks(window_size).enumerate() {
+            if calculate_rms(chunk) >= SILENCE_THRESHOLD {
+                // Found speech - update last speech position
+                self.last_speech_pos = start_pos + (i + 1) * window_size;
+            }
+        }
     }
 
     pub fn take(&mut self) -> Vec<f32> {
+        self.last_speech_pos = 0;
         std::mem::take(&mut self.samples)
+    }
+
+    /// Check if there's been enough silence to warrant chunking
+    /// Returns true if silence >= MIN_SILENCE_DURATION_MS since last speech
+    pub fn has_silence_boundary(&self) -> bool {
+        if self.samples.is_empty() || self.last_speech_pos == 0 {
+            return false;
+        }
+
+        let silence_samples = self.samples.len().saturating_sub(self.last_speech_pos);
+        let min_silence_samples = (self.sample_rate * MIN_SILENCE_DURATION_MS / 1000) as usize;
+
+        silence_samples >= min_silence_samples
+    }
+
+    /// Take the audio chunk up to the silence boundary (speech portion only)
+    /// Returns None if no silence boundary detected or buffer too small
+    pub fn take_chunk_at_silence(&mut self) -> Option<Vec<f32>> {
+        if !self.has_silence_boundary() {
+            return None;
+        }
+
+        // Only take if we have meaningful content (at least 0.5s of speech)
+        let min_chunk_samples = (self.sample_rate / 2) as usize;
+        if self.last_speech_pos < min_chunk_samples {
+            return None;
+        }
+
+        // Split at the middle of the silence for cleaner boundaries
+        let silence_start = self.last_speech_pos;
+        let silence_samples = self.samples.len() - silence_start;
+        let split_point = silence_start + silence_samples / 2;
+
+        // Take the chunk
+        let chunk: Vec<f32> = self.samples.drain(..split_point).collect();
+
+        // Reset speech position relative to remaining samples
+        self.last_speech_pos = 0;
+
+        log::info!(
+            "Extracted chunk of {:.1}s, remaining buffer: {:.1}s",
+            chunk.len() as f32 / self.sample_rate as f32,
+            self.samples.len() as f32 / self.sample_rate as f32
+        );
+
+        Some(chunk)
+    }
+
+    /// Get current buffer length in samples
+    pub fn len(&self) -> usize {
+        self.samples.len()
+    }
+
+    /// Check if buffer is empty
+    pub fn is_empty(&self) -> bool {
+        self.samples.is_empty()
     }
 }
 
@@ -43,6 +122,11 @@ pub type SharedBuffer = Arc<Mutex<AudioBuffer>>;
 /// Creates a new shared buffer
 pub fn create_shared_buffer() -> SharedBuffer {
     Arc::new(Mutex::new(AudioBuffer::new()))
+}
+
+/// Creates a new shared buffer with specified sample rate
+pub fn create_shared_buffer_with_rate(sample_rate: u32) -> SharedBuffer {
+    Arc::new(Mutex::new(AudioBuffer::with_sample_rate(sample_rate)))
 }
 
 /// Audio recorder configuration
@@ -118,10 +202,19 @@ pub fn stop_recording(
     }
 }
 
+/// Resample audio chunk to 16kHz for Whisper
+/// Used for streaming transcription of individual chunks
+pub fn resample_chunk(audio: &[f32], input_sample_rate: u32) -> Result<Vec<f32>, AudioError> {
+    if input_sample_rate == WHISPER_SAMPLE_RATE {
+        return Ok(audio.to_vec());
+    }
+    resample_audio(audio, input_sample_rate, WHISPER_SAMPLE_RATE)
+}
+
 /// Silence detection threshold (RMS value)
 const SILENCE_THRESHOLD: f32 = 0.01;
 /// Minimum silence duration in milliseconds to be considered a split point
-const MIN_SILENCE_DURATION_MS: u32 = 300;
+const MIN_SILENCE_DURATION_MS: u32 = 1000;
 
 /// Calculate RMS (root mean square) of audio samples
 fn calculate_rms(samples: &[f32]) -> f32 {
@@ -134,7 +227,7 @@ fn calculate_rms(samples: &[f32]) -> f32 {
 
 /// Find silence boundaries in audio for chunking
 /// Returns indices where the audio should be split (at the center of each silence gap)
-/// Splits at every silence >= MIN_SILENCE_DURATION_MS (300ms)
+/// Splits at every silence >= MIN_SILENCE_DURATION_MS (1000ms)
 pub fn find_silence_boundaries(audio: &[f32], sample_rate: u32) -> Vec<usize> {
     let min_silence_samples = (sample_rate * MIN_SILENCE_DURATION_MS / 1000) as usize;
     let window_size = (sample_rate / 100) as usize; // 10ms windows for RMS calculation
@@ -156,7 +249,7 @@ pub fn find_silence_boundaries(audio: &[f32], sample_rate: u32) -> Vec<usize> {
             if let Some(start) = silence_start {
                 let silence_duration = pos - start;
 
-                // Split at every silence >= 300ms
+                // Split at every silence >= 1000ms
                 if silence_duration >= min_silence_samples {
                     let split_point = start + silence_duration / 2; // Split at middle of silence
                     boundaries.push(split_point);
@@ -300,7 +393,7 @@ mod tests {
     #[test]
     fn test_find_silence_in_audio() {
         let sample_rate = 16000;
-        // Create audio: 5s speech, 0.5s silence, 5s speech, 0.5s silence, 5s speech
+        // Create audio: 5s speech, 1.5s silence, 5s speech, 1.5s silence, 5s speech
         let mut audio = Vec::new();
 
         // 5 seconds of "speech" (non-silent signal)
@@ -308,8 +401,8 @@ mod tests {
             audio.push((i as f32 * 0.01).sin() * 0.3);
         }
 
-        // 0.5 seconds of silence (should trigger split - >= 300ms)
-        for _ in 0..(sample_rate / 2) {
+        // 1.5 seconds of silence (should trigger split - >= 1000ms)
+        for _ in 0..((1.5 * sample_rate as f32) as usize) {
             audio.push(0.0);
         }
 
@@ -318,8 +411,8 @@ mod tests {
             audio.push((i as f32 * 0.01).sin() * 0.3);
         }
 
-        // 0.5 seconds of silence
-        for _ in 0..(sample_rate / 2) {
+        // 1.5 seconds of silence
+        for _ in 0..((1.5 * sample_rate as f32) as usize) {
             audio.push(0.0);
         }
 
@@ -330,7 +423,7 @@ mod tests {
 
         let boundaries = find_silence_boundaries(&audio, sample_rate);
 
-        // Should find 2 boundaries (at each 500ms silence)
+        // Should find 2 boundaries (at each 1.5s silence)
         assert_eq!(boundaries.len(), 2, "Expected 2 boundaries, got {:?}", boundaries);
     }
 
@@ -366,7 +459,7 @@ mod tests {
     #[test]
     fn test_short_audio_with_silence_is_chunked() {
         let sample_rate = 16000;
-        // Create 10 seconds of audio with a silence in the middle
+        // Create 12 seconds of audio with a silence in the middle
         // Should chunk at the silence regardless of total duration
         let mut audio = Vec::new();
 
@@ -375,13 +468,13 @@ mod tests {
             audio.push((i as f32 * 0.01).sin() * 0.3);
         }
 
-        // 0.5 seconds of silence (>= 300ms threshold)
-        for _ in 0..(sample_rate / 2) {
+        // 1.5 seconds of silence (>= 1000ms threshold)
+        for _ in 0..((1.5 * sample_rate as f32) as usize) {
             audio.push(0.0);
         }
 
-        // 4.5 seconds of speech
-        for i in 0..((4.5 * sample_rate as f32) as usize) {
+        // 5.5 seconds of speech
+        for i in 0..((5.5 * sample_rate as f32) as usize) {
             audio.push((i as f32 * 0.01).sin() * 0.3);
         }
 
@@ -396,7 +489,7 @@ mod tests {
     #[test]
     fn test_short_silence_not_split() {
         let sample_rate = 16000;
-        // Create audio with a short silence (< 300ms)
+        // Create audio with a short silence (< 1000ms)
         let mut audio = Vec::new();
 
         // 5 seconds of speech
@@ -404,8 +497,8 @@ mod tests {
             audio.push((i as f32 * 0.01).sin() * 0.3);
         }
 
-        // 0.2 seconds of silence (< 300ms threshold)
-        for _ in 0..((0.2 * sample_rate as f32) as usize) {
+        // 0.8 seconds of silence (< 1000ms threshold)
+        for _ in 0..((0.8 * sample_rate as f32) as usize) {
             audio.push(0.0);
         }
 

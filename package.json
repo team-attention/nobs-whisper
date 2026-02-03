@@ -1,6 +1,6 @@
 {
   "name": "nobs-whisper",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "description": "Local Whisper Voice Typing App for macOS",
   "type": "module",
   "scripts": {
