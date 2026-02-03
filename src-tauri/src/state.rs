@@ -456,19 +456,11 @@ pub fn toggle_recording_with_app(
                         let language_ref = language_owned.as_deref();
                         let vocabulary_ref = vocabulary_owned.as_deref();
 
-                        // Use chunked transcription for long audio (>30s = 480,000 samples at 16kHz)
-                        let transcription_result = if audio.len() > 480_000 {
-                            let boundaries = audio::find_silence_boundaries(&audio, 16000);
-                            let chunks = audio::split_at_silences(&audio, &boundaries);
-                            if chunks.len() > 1 {
-                                log::info!("Using chunked transcription: {} chunks", chunks.len());
-                                whisper.transcribe_chunked(chunks, language_ref, vocabulary_ref)
-                            } else {
-                                whisper.transcribe(&audio, language_ref, vocabulary_ref)
-                            }
-                        } else {
-                            whisper.transcribe(&audio, language_ref, vocabulary_ref)
-                        };
+                        // Always use chunked transcription - split at all silence boundaries
+                        let boundaries = audio::find_silence_boundaries(&audio, 16000);
+                        let chunks = audio::split_at_silences(&audio, &boundaries);
+                        log::info!("Transcribing {} chunks", chunks.len());
+                        let transcription_result = whisper.transcribe_chunked(chunks, language_ref, vocabulary_ref);
 
                         match transcription_result {
                             Ok(text) => {
