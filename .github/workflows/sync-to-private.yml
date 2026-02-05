@@ -15,15 +15,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Debug token
-        env:
-          REPO_SYNC_TOKEN: ${{ secrets.REPO_SYNC_TOKEN }}
-        run: |
-          echo "Token length: ${#REPO_SYNC_TOKEN}"
-          echo "Token prefix: ${REPO_SYNC_TOKEN:0:4}"
-          # Test API access
-          curl -s -o /dev/null -w "%{http_code}" -H "Authorization: token ${REPO_SYNC_TOKEN}" https://api.github.com/repos/team-attention/nobs-whisper-dev
-
       - name: Push to private repo
         env:
           REPO_SYNC_TOKEN: ${{ secrets.REPO_SYNC_TOKEN }}
@@ -32,8 +23,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Add private repo as remote
-          git remote add private https://x-access-token:${REPO_SYNC_TOKEN}@github.com/team-attention/nobs-whisper-dev.git
+          # Use credential helper instead of URL-embedded token
+          git config credential.helper '!f() { echo "username=x-access-token"; echo "password=${REPO_SYNC_TOKEN}"; }; f'
+
+          # Add private repo as remote (without token in URL)
+          git remote add private https://github.com/team-attention/nobs-whisper-dev.git
 
           # Fetch private repo to check for conflicts
           git fetch private main
