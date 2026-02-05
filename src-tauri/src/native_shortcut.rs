@@ -320,10 +320,10 @@ pub fn start_native_listener(app: AppHandle, state: SharedAppState) {
                         // Debug: log all modifier key events
                         log::debug!("FlagsChanged: keycode={}, flags={:?}", keycode, flags);
 
-                        // Get current shortcut from state
-                        let shortcut_str = {
+                        // Get current shortcut and push_to_talk mode from state
+                        let (shortcut_str, push_to_talk) = {
                             if let Ok(state_guard) = state.lock() {
-                                state_guard.config.shortcut.clone()
+                                (state_guard.config.shortcut.clone(), state_guard.config.push_to_talk)
                             } else {
                                 return None;
                             }
@@ -354,27 +354,44 @@ pub fn start_native_listener(app: AppHandle, state: SharedAppState) {
                             log::debug!("Modifier key event: keycode={}, pressed={}", keycode, modifier_pressed);
 
                             if modifier_pressed && !RIGHT_ALT_PRESSED.load(Ordering::SeqCst) {
-                                // Key just pressed - toggle recording
+                                // Key just pressed
                                 RIGHT_ALT_PRESSED.store(true, Ordering::SeqCst);
-                                log::info!("Native shortcut pressed (keycode: {})", keycode);
+                                log::info!("Native shortcut pressed (keycode: {}, push_to_talk: {})", keycode, push_to_talk);
 
-                                // Toggle recording (same as standard shortcut)
                                 let state_ref = app.state::<SharedAppState>();
-                                match crate::state::toggle_recording_with_app(&app, &state_ref) {
-                                    Ok(snapshot) => {
-                                        if snapshot.is_recording {
-                                            log::info!("Recording started via native shortcut");
-                                        } else {
-                                            log::info!("Recording stopped via native shortcut");
-                                        }
+                                if push_to_talk {
+                                    // Push-to-talk: start recording on key press
+                                    match crate::state::start_recording_with_app(&app, &state_ref) {
+                                        Ok(_) => log::info!("Recording started via push-to-talk"),
+                                        Err(e) => log::error!("Failed to start recording: {}", e),
                                     }
-                                    Err(e) => {
-                                        log::error!("Failed to toggle recording: {}", e);
+                                } else {
+                                    // Toggle mode: toggle recording on key press
+                                    match crate::state::toggle_recording_with_app(&app, &state_ref) {
+                                        Ok(snapshot) => {
+                                            if snapshot.is_recording {
+                                                log::info!("Recording started via native shortcut");
+                                            } else {
+                                                log::info!("Recording stopped via native shortcut");
+                                            }
+                                        }
+                                        Err(e) => log::error!("Failed to toggle recording: {}", e),
                                     }
                                 }
                             } else if !modifier_pressed && RIGHT_ALT_PRESSED.load(Ordering::SeqCst) {
-                                // Key released - just update state, don't toggle
+                                // Key released
                                 RIGHT_ALT_PRESSED.store(false, Ordering::SeqCst);
+                                log::info!("Native shortcut released (push_to_talk: {})", push_to_talk);
+
+                                if push_to_talk {
+                                    // Push-to-talk: stop recording on key release
+                                    let state_ref = app.state::<SharedAppState>();
+                                    match crate::state::stop_recording_with_app(&app, &state_ref) {
+                                        Ok(_) => log::info!("Recording stopped via push-to-talk"),
+                                        Err(e) => log::error!("Failed to stop recording: {}", e),
+                                    }
+                                }
+                                // Toggle mode: do nothing on key release
                             }
                         }
                     }

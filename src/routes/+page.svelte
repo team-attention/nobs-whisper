@@ -22,6 +22,7 @@
     language: string;
     autoLaunch: boolean;
     maxRecordingDuration: number;
+    pushToTalk: boolean;
   }
 
   let models = $state<ModelInfo[]>([]);
@@ -31,6 +32,7 @@
     language: "auto",
     autoLaunch: false,
     maxRecordingDuration: 60,
+    pushToTalk: false,
   });
   let downloadingModel = $state<string | null>(null);
   let downloadProgress = $state<number>(0);
@@ -468,10 +470,45 @@
           <button class="btn-text" onclick={startCapture}>Change</button>
         </div>
         {#if isNativeShortcut(config.shortcut)}
-          <div class="hint">Press to toggle recording</div>
+          <div class="hint">
+            {#if config.pushToTalk}
+              Hold to record, release to stop
+            {:else}
+              Press to toggle recording
+            {/if}
+          </div>
         {/if}
       {/if}
     </div>
+
+    {#if isNativeShortcut(config.shortcut)}
+    <div class="group">
+      <label>Recording Mode</label>
+      <div class="toggle-group">
+        <button
+          class="toggle-btn"
+          class:active={!config.pushToTalk}
+          onclick={() => { config.pushToTalk = false; saveConfig(); }}
+        >
+          Toggle
+        </button>
+        <button
+          class="toggle-btn"
+          class:active={config.pushToTalk}
+          onclick={() => { config.pushToTalk = true; saveConfig(); }}
+        >
+          Push-to-Talk
+        </button>
+      </div>
+      <div class="hint">
+        {#if config.pushToTalk}
+          Record while holding the key
+        {:else}
+          Press once to start, again to stop
+        {/if}
+      </div>
+    </div>
+    {/if}
 
     <div class="group">
       <label for="language">Language</label>
@@ -855,6 +892,37 @@
     font-style: italic;
   }
 
+  .toggle-group {
+    display: flex;
+    border: 1px solid #e0e0e0;
+    border-radius: 6px;
+    overflow: hidden;
+  }
+
+  .toggle-btn {
+    flex: 1;
+    padding: 10px 12px;
+    border: none;
+    background: #fff;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.15s;
+    color: #666;
+  }
+
+  .toggle-btn:first-child {
+    border-right: 1px solid #e0e0e0;
+  }
+
+  .toggle-btn:hover:not(.active) {
+    background: #f5f5f5;
+  }
+
+  .toggle-btn.active {
+    background: #1d1d1f;
+    color: #fff;
+  }
+
   @media (prefers-color-scheme: dark) {
     :global(body) {
       color: #f5f5f7;
@@ -1000,6 +1068,28 @@
 
     .shortcut-value {
       color: #f5f5f7;
+    }
+
+    .toggle-group {
+      border-color: #3a3a3c;
+    }
+
+    .toggle-btn {
+      background: #2c2c2e;
+      color: #999;
+    }
+
+    .toggle-btn:first-child {
+      border-color: #3a3a3c;
+    }
+
+    .toggle-btn:hover:not(.active) {
+      background: #3a3a3c;
+    }
+
+    .toggle-btn.active {
+      background: #f5f5f7;
+      color: #1c1c1e;
     }
   }
 </style>

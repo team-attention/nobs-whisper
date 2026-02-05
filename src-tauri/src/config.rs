@@ -28,6 +28,9 @@ pub struct AppConfig {
     /// Custom vocabulary to help Whisper recognize specific terms
     #[serde(default = "default_custom_vocabulary")]
     pub custom_vocabulary: String,
+    /// Push-to-talk mode: record while key is held, stop when released
+    #[serde(default)]
+    pub push_to_talk: bool,
 }
 
 fn default_max_recording_duration() -> u64 {
@@ -47,6 +50,7 @@ impl Default for AppConfig {
             auto_launch: false,
             max_recording_duration: default_max_recording_duration(),
             custom_vocabulary: default_custom_vocabulary(),
+            push_to_talk: false,
         }
     }
 }
