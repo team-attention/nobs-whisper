@@ -14,6 +14,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Push to private repo
         env:
@@ -23,10 +24,10 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Use credential helper instead of URL-embedded token
-          git config credential.helper '!f() { echo "username=x-access-token"; echo "password=${REPO_SYNC_TOKEN}"; }; f'
+          # Set up auth header for github.com
+          git config --global http.https://github.com/.extraheader "Authorization: Basic $(echo -n "x-access-token:${REPO_SYNC_TOKEN}" | base64)"
 
-          # Add private repo as remote (without token in URL)
+          # Add private repo as remote
           git remote add private https://github.com/team-attention/nobs-whisper-dev.git
 
           # Fetch private repo to check for conflicts
