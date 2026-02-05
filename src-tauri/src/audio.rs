@@ -64,14 +64,16 @@ impl AudioBuffer {
 
             // Update adaptive noise floor during quiet periods
             // Only update if this looks like background noise (very low energy)
-            if rms < self.noise_floor * 0.5 && self.noise_floor_frames < 100 {
+            if rms < self.noise_floor * NOISE_FLOOR_UPDATE_THRESHOLD_FACTOR
+                && self.noise_floor_frames < NOISE_FLOOR_UPDATE_MAX_FRAMES {
                 // Exponential moving average for noise floor
-                self.noise_floor = self.noise_floor * 0.95 + rms * 0.05;
+                self.noise_floor = self.noise_floor * NOISE_FLOOR_EMA_DECAY + rms * (1.0 - NOISE_FLOOR_EMA_DECAY);
                 self.noise_floor_frames += 1;
             }
 
-            // Use adaptive threshold: 3x noise floor, but at least MIN threshold
-            let adaptive_threshold = (self.noise_floor * 3.0).max(SILENCE_THRESHOLD * 0.5);
+            // Use adaptive threshold: noise_floor * factor, but at least MIN threshold
+            let adaptive_threshold = (self.noise_floor * ADAPTIVE_THRESHOLD_NOISE_FACTOR)
+                .max(SILENCE_THRESHOLD * MIN_THRESHOLD_FACTOR);
 
             if rms >= adaptive_threshold {
                 // Found speech - update last speech position
@@ -127,10 +129,10 @@ impl AudioBuffer {
         chunk.extend_from_slice(&self.samples[..split_point]);
 
         // Save overlap for next chunk (last overlap_samples of current chunk)
+        // Using saturating_sub handles the case where split_point <= overlap_samples
         self.overlap_buffer.clear();
-        if split_point > overlap_samples {
-            self.overlap_buffer.extend_from_slice(&self.samples[split_point - overlap_samples..split_point]);
-        }
+        let overlap_start = split_point.saturating_sub(overlap_samples);
+        self.overlap_buffer.extend_from_slice(&self.samples[overlap_start..split_point]);
 
         // Remove processed samples from buffer
         self.samples.drain(..split_point);
@@ -267,6 +269,24 @@ const MIN_SILENCE_DURATION_MS: u32 = 700; // Reduced from 1000ms for more respon
 /// Minimum chunk duration in milliseconds
 const MIN_CHUNK_DURATION_MS: u32 = 1000;
 
+// Adaptive noise floor constants
+/// Maximum number of frames to use for noise floor estimation
+const NOISE_FLOOR_UPDATE_MAX_FRAMES: usize = 100;
+/// Multiplier for noise floor to get adaptive threshold
+const ADAPTIVE_THRESHOLD_NOISE_FACTOR: f32 = 3.0;
+/// Minimum threshold as a fraction of SILENCE_THRESHOLD
+const MIN_THRESHOLD_FACTOR: f32 = 0.5;
+/// Exponential moving average decay factor for noise floor
+const NOISE_FLOOR_EMA_DECAY: f32 = 0.95;
+/// Noise floor update threshold factor (update only when RMS < noise_floor * this)
+const NOISE_FLOOR_UPDATE_THRESHOLD_FACTOR: f32 = 0.5;
+/// Number of windows for noise floor estimation (500ms at 20ms windows = 25)
+const NOISE_FLOOR_ESTIMATION_WINDOWS: usize = 25;
+/// Percentile to use for noise floor estimation (10th percentile)
+const NOISE_FLOOR_PERCENTILE: f32 = 0.1;
+/// Minimum noise floor as fraction of SILENCE_THRESHOLD
+const MIN_NOISE_FLOOR_FACTOR: f32 = 0.3;
+
 /// Calculate RMS (root mean square) of audio samples
 fn calculate_rms(samples: &[f32]) -> f32 {
     if samples.is_empty() {
@@ -279,10 +299,9 @@ fn calculate_rms(samples: &[f32]) -> f32 {
 /// Estimate noise floor from the beginning of the audio
 fn estimate_noise_floor(audio: &[f32], sample_rate: u32) -> f32 {
     let window_size = (sample_rate / 50) as usize; // 20ms windows
-    let num_windows = 25; // First 500ms
 
     let mut rms_values: Vec<f32> = Vec::new();
-    for i in 0..num_windows {
+    for i in 0..NOISE_FLOOR_ESTIMATION_WINDOWS {
         let start = i * window_size;
         if start + window_size <= audio.len() {
             rms_values.push(calculate_rms(&audio[start..start + window_size]));
@@ -293,13 +312,13 @@ fn estimate_noise_floor(audio: &[f32], sample_rate: u32) -> f32 {
         return SILENCE_THRESHOLD;
     }
 
-    // Use the 10th percentile as noise floor estimate
+    // Use the percentile as noise floor estimate
     rms_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let percentile_idx = (rms_values.len() as f32 * 0.1) as usize;
+    let percentile_idx = (rms_values.len() as f32 * NOISE_FLOOR_PERCENTILE) as usize;
     let noise_floor = rms_values.get(percentile_idx).copied().unwrap_or(SILENCE_THRESHOLD);
 
     // Return at least the minimum threshold
-    noise_floor.max(SILENCE_THRESHOLD * 0.3)
+    noise_floor.max(SILENCE_THRESHOLD * MIN_NOISE_FLOOR_FACTOR)
 }
 
 /// Find silence boundaries in audio for chunking
@@ -312,7 +331,8 @@ pub fn find_silence_boundaries(audio: &[f32], sample_rate: u32) -> Vec<usize> {
 
     // Estimate noise floor for adaptive thresholding
     let noise_floor = estimate_noise_floor(audio, sample_rate);
-    let adaptive_threshold = (noise_floor * 3.0).max(SILENCE_THRESHOLD * 0.5);
+    let adaptive_threshold = (noise_floor * ADAPTIVE_THRESHOLD_NOISE_FACTOR)
+        .max(SILENCE_THRESHOLD * MIN_THRESHOLD_FACTOR);
 
     log::info!(
         "Adaptive VAD: noise_floor={:.4}, threshold={:.4}",
@@ -323,6 +343,18 @@ pub fn find_silence_boundaries(audio: &[f32], sample_rate: u32) -> Vec<usize> {
     let mut boundaries = Vec::new();
     let mut silence_start: Option<usize> = None;
     let mut last_boundary: usize = 0;
+
+    // Helper to add boundary if silence is long enough and creates valid chunk
+    let mut try_add_boundary = |silence_start: usize, silence_end: usize, last_boundary: &mut usize, boundaries: &mut Vec<usize>| {
+        let silence_duration = silence_end - silence_start;
+        if silence_duration >= min_silence_samples {
+            let split_point = silence_start + silence_duration / 2;
+            if split_point - *last_boundary >= min_chunk_samples {
+                boundaries.push(split_point);
+                *last_boundary = split_point;
+            }
+        }
+    };
 
     let mut pos = 0;
     while pos + window_size <= audio.len() {
@@ -336,18 +368,7 @@ pub fn find_silence_boundaries(audio: &[f32], sample_rate: u32) -> Vec<usize> {
         } else {
             // Not in silence - check if we just exited a long enough silence
             if let Some(start) = silence_start {
-                let silence_duration = pos - start;
-
-                // Split at every silence >= threshold, but ensure minimum chunk size
-                if silence_duration >= min_silence_samples {
-                    let split_point = start + silence_duration / 2; // Split at middle of silence
-
-                    // Only add boundary if it creates a chunk of at least min_chunk_samples
-                    if split_point - last_boundary >= min_chunk_samples {
-                        boundaries.push(split_point);
-                        last_boundary = split_point;
-                    }
-                }
+                try_add_boundary(start, pos, &mut last_boundary, &mut boundaries);
             }
             silence_start = None;
         }
@@ -357,13 +378,7 @@ pub fn find_silence_boundaries(audio: &[f32], sample_rate: u32) -> Vec<usize> {
 
     // Check for trailing silence (audio ends during silence)
     if let Some(start) = silence_start {
-        let silence_duration = audio.len() - start;
-        if silence_duration >= min_silence_samples {
-            let split_point = start + silence_duration / 2;
-            if split_point - last_boundary >= min_chunk_samples {
-                boundaries.push(split_point);
-            }
-        }
+        try_add_boundary(start, audio.len(), &mut last_boundary, &mut boundaries);
     }
 
     log::info!(
@@ -395,13 +410,8 @@ pub fn split_at_silences_with_overlap(audio: &[f32], boundaries: &[usize], sampl
 
     for &boundary in boundaries {
         if boundary > start && boundary < audio.len() {
-            // Include overlap from previous chunk start (except for first chunk)
-            let chunk_start = if start > 0 && start >= overlap_samples {
-                start - overlap_samples
-            } else {
-                start
-            };
-
+            // Include overlap from previous chunk (saturating_sub handles first chunk case)
+            let chunk_start = start.saturating_sub(overlap_samples);
             chunks.push(audio[chunk_start..boundary].to_vec());
             start = boundary;
         }
@@ -409,11 +419,7 @@ pub fn split_at_silences_with_overlap(audio: &[f32], boundaries: &[usize], sampl
 
     // Add the final chunk with overlap
     if start < audio.len() {
-        let chunk_start = if start > 0 && start >= overlap_samples {
-            start - overlap_samples
-        } else {
-            start
-        };
+        let chunk_start = start.saturating_sub(overlap_samples);
         chunks.push(audio[chunk_start..].to_vec());
     }
 
@@ -540,9 +546,14 @@ mod tests {
     #[test]
     fn test_find_silence_in_audio() {
         let sample_rate = 16000;
-        // Create audio: 2s speech, 1s silence, 2s speech, 1s silence, 2s speech
+        // Create audio: 0.5s quiet (for noise floor), 2s speech, 1s silence, 2s speech, 1s silence, 2s speech
         // (adjusted for new MIN_SILENCE_DURATION_MS = 700ms)
         let mut audio = Vec::new();
+
+        // 500ms of quiet background (for noise floor estimation)
+        for i in 0..((0.5 * sample_rate as f32) as usize) {
+            audio.push((i as f32 * 0.1).sin() * 0.002); // Very quiet
+        }
 
         // 2 seconds of "speech" (non-silent signal)
         for i in 0..(2 * sample_rate) {
@@ -600,10 +611,18 @@ mod tests {
     #[test]
     fn test_no_silence_returns_single_chunk() {
         let sample_rate = 16000;
-        // Create 10 seconds of continuous speech with no silence
-        let audio: Vec<f32> = (0..(10 * sample_rate))
-            .map(|i| (i as f32 * 0.01).sin() * 0.3)
-            .collect();
+        // Create audio: 0.5s quiet (for noise floor) + 10 seconds of continuous speech
+        let mut audio = Vec::new();
+
+        // 500ms of quiet background (for noise floor estimation)
+        for i in 0..((0.5 * sample_rate as f32) as usize) {
+            audio.push((i as f32 * 0.1).sin() * 0.002);
+        }
+
+        // 10 seconds of continuous speech with no silence
+        for i in 0..(10 * sample_rate) {
+            audio.push((i as f32 * 0.01).sin() * 0.3);
+        }
 
         let boundaries = find_silence_boundaries(&audio, sample_rate);
         let chunks = split_at_silences(&audio, &boundaries);
@@ -616,8 +635,13 @@ mod tests {
     #[test]
     fn test_audio_with_silence_is_chunked() {
         let sample_rate = 16000;
-        // Create audio with a silence in the middle
+        // Create audio: 0.5s quiet (for noise floor), silence in the middle
         let mut audio = Vec::new();
+
+        // 500ms of quiet background (for noise floor estimation)
+        for i in 0..((0.5 * sample_rate as f32) as usize) {
+            audio.push((i as f32 * 0.1).sin() * 0.002);
+        }
 
         // 2 seconds of speech (>= MIN_CHUNK_DURATION_MS)
         for i in 0..(2 * sample_rate) {
@@ -645,8 +669,13 @@ mod tests {
     #[test]
     fn test_short_silence_not_split() {
         let sample_rate = 16000;
-        // Create audio with a short silence (< 700ms)
+        // Create audio: 0.5s quiet (for noise floor), short silence (< 700ms)
         let mut audio = Vec::new();
+
+        // 500ms of quiet background (for noise floor estimation)
+        for i in 0..((0.5 * sample_rate as f32) as usize) {
+            audio.push((i as f32 * 0.1).sin() * 0.002);
+        }
 
         // 2 seconds of speech
         for i in 0..(2 * sample_rate) {
