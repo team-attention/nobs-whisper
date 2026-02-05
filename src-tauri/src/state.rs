@@ -707,7 +707,7 @@ pub fn stop_recording_with_app(
         // Wait for transcription worker to finish (with timeout)
         if let Some(handle) = transcription_thread {
             log::info!("Waiting for streaming transcription worker to finish...");
-            // Give the worker up to 30 seconds to finish current work
+            // Wait for the worker to finish its current work
             let wait_result = std::thread::spawn(move || handle.join()).join();
             match wait_result {
                 Ok(Ok(())) => log::info!("Streaming transcription worker finished"),
