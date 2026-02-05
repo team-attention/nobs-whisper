@@ -1,6 +1,6 @@
 [package]
 name = "nobs-whisper"
-version = "0.1.14"
+version = "0.1.18"
 description = "Local Whisper Voice Typing App for macOS"
 authors = ["eatnug"]
 edition = "2021"
