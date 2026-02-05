@@ -473,6 +473,179 @@ fn emit_state_change(app: &AppHandle, snapshot: &AppStateSnapshot) {
     }
 }
 
+/// Stop recording/transcription (idempotent - safe to call multiple times)
+/// Unlike toggle_recording_with_app, this will never start a new recording
+pub fn stop_recording_with_app(
+    app: &AppHandle,
+    state: &SharedAppState,
+) -> Result<AppStateSnapshot, String> {
+    let mut state_guard = state.lock().map_err(|e| e.to_string())?;
+
+    // If not recording, just return current state (idempotent)
+    if !state_guard.is_recording {
+        log::info!("stop_recording_with_app called but not recording - no-op");
+        let snapshot = state_guard.snapshot();
+        return Ok(snapshot);
+    }
+
+    // Stop recording (same logic as toggle when is_recording is true)
+    log::info!("Stopping recording via emergency stop...");
+    state_guard.is_recording = false;
+
+    // Signal recording thread to stop
+    if let Some(sender) = state_guard.recording_state.stop_sender.take() {
+        let _ = sender.send(());
+    }
+
+    // Drop chunk sender to signal transcription worker to finish
+    state_guard.recording_state.chunk_sender = None;
+
+    // Get buffer, sample rate, and streaming state
+    let buffer_opt = state_guard.recording_state.audio_buffer.clone();
+    let sample_rate = state_guard.recording_state.input_sample_rate;
+    let streaming_results = state_guard.recording_state.transcription_results.clone();
+    let transcription_thread = state_guard.recording_state.transcription_thread.take();
+
+    // Clone whisper engine Arc and get language/vocabulary before releasing lock
+    let whisper_opt = state_guard.whisper_engine.clone();
+    let language_owned = if state_guard.config.language == "auto" {
+        None
+    } else {
+        Some(state_guard.config.language.clone())
+    };
+    let vocabulary_owned = if state_guard.config.custom_vocabulary.is_empty() {
+        None
+    } else {
+        Some(state_guard.config.custom_vocabulary.clone())
+    };
+
+    // Set transcribing state and release lock BEFORE any heavy processing
+    state_guard.is_transcribing = true;
+    let snapshot = state_guard.snapshot();
+    drop(state_guard);
+
+    // Emit state change - frontend can poll freely now
+    emit_state_change(app, &snapshot);
+
+    // Spawn a thread for audio processing and transcription
+    let state_clone = state.clone();
+    let app_clone = app.clone();
+
+    std::thread::spawn(move || {
+        // Wait for transcription worker to finish (with timeout)
+        if let Some(handle) = transcription_thread {
+            log::info!("Waiting for streaming transcription worker to finish...");
+            let wait_result = std::thread::spawn(move || handle.join()).join();
+            match wait_result {
+                Ok(Ok(())) => log::info!("Streaming transcription worker finished"),
+                Ok(Err(_)) => log::error!("Streaming transcription worker panicked"),
+                Err(_) => log::error!("Failed to wait for transcription worker"),
+            }
+        }
+
+        // Collect streaming results
+        let mut all_results: Vec<String> = if let Ok(results) = streaming_results.lock() {
+            results.clone()
+        } else {
+            Vec::new()
+        };
+        log::info!("Collected {} streaming transcription results", all_results.len());
+
+        // Get remaining audio from buffer
+        let remaining_audio = if let Some(ref buffer) = buffer_opt {
+            match audio::stop_recording(buffer, sample_rate) {
+                Ok(data) => {
+                    log::info!("Got {} remaining audio samples", data.len());
+                    Some(data)
+                }
+                Err(e) => {
+                    log::error!("Failed to get remaining audio: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Transcribe remaining audio (single chunk - no further splitting needed)
+        if let Some(audio) = remaining_audio {
+            if audio.len() > 1600 {
+                if let Some(ref whisper) = whisper_opt {
+                    let language_ref = language_owned.as_deref();
+                    let vocabulary_ref = vocabulary_owned.as_deref();
+
+                    log::info!("Transcribing remaining {:.1}s audio", audio.len() as f32 / 16000.0);
+                    match whisper.transcribe(&audio, language_ref, vocabulary_ref) {
+                        Ok(text) => {
+                            if !text.is_empty() {
+                                log::info!("Remaining audio transcription: {}", text);
+                                all_results.push(text);
+                            }
+                        }
+                        Err(e) => {
+                            log::error!("Failed to transcribe remaining audio: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Combine all results
+        let final_text = all_results.join(" ").trim().to_string();
+
+        if final_text.is_empty() {
+            if let Ok(mut state_guard) = state_clone.lock() {
+                state_guard.is_transcribing = false;
+                let snapshot = state_guard.snapshot();
+                emit_state_change(&app_clone, &snapshot);
+            }
+            return;
+        }
+
+        log::info!("Final combined transcription: {}", final_text);
+
+        // Update state
+        if let Ok(mut state_guard) = state_clone.lock() {
+            state_guard.last_transcription = Some(final_text.clone());
+            state_guard.is_transcribing = false;
+            let final_snapshot = state_guard.snapshot();
+            drop(state_guard);
+
+            // Type the text or copy to clipboard - must run on main thread
+            let text_to_type = final_text;
+            let app_for_typing = app_clone.clone();
+            let snapshot_for_typing = final_snapshot.clone();
+            let _ = app_clone.run_on_main_thread(move || {
+                match type_transcription(&text_to_type) {
+                    Ok(true) => {
+                        log::info!("Text typed successfully");
+                        emit_state_change(&app_for_typing, &snapshot_for_typing);
+                    }
+                    Ok(false) => {
+                        log::info!("Text copied to clipboard (no focused input)");
+                        let _ = indicator::set_indicator_status(&app_for_typing, "copied");
+                        let app_delayed = app_for_typing.clone();
+                        let snapshot_delayed = snapshot_for_typing.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(1000));
+                            let app_for_emit = app_delayed.clone();
+                            let _ = app_delayed.run_on_main_thread(move || {
+                                emit_state_change(&app_for_emit, &snapshot_delayed);
+                            });
+                        });
+                    }
+                    Err(e) => {
+                        log::error!("Failed to type/copy text: {}", e);
+                        emit_state_change(&app_for_typing, &snapshot_for_typing);
+                    }
+                }
+            });
+        }
+    });
+
+    Ok(snapshot)
+}
+
 /// Toggle recording with app handle for event emission
 pub fn toggle_recording_with_app(
     app: &AppHandle,

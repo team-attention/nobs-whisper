@@ -145,6 +145,7 @@ const KEYCODE_RIGHT_CTRL: i64 = 62;
 const KEYCODE_LEFT_CTRL: i64 = 59;
 const KEYCODE_RIGHT_SHIFT: i64 = 60;
 const KEYCODE_LEFT_SHIFT: i64 = 56;
+const KEYCODE_ESC: i64 = 53;
 
 /// Check if accessibility permission is granted (callable from frontend)
 #[tauri::command]
@@ -266,7 +267,7 @@ pub fn start_native_listener(app: AppHandle, state: SharedAppState) {
             CGEventTapLocation::HID,
             CGEventTapPlacement::HeadInsertEventTap,
             CGEventTapOptions::ListenOnly,
-            vec![CGEventType::FlagsChanged],
+            vec![CGEventType::FlagsChanged, CGEventType::KeyDown],
             {
                 let app = app.clone();
                 let state = state.clone();
@@ -278,6 +279,36 @@ pub fn start_native_listener(app: AppHandle, state: SharedAppState) {
                     // Check if listener is paused (capture mode)
                     if LISTENER_PAUSED.load(Ordering::SeqCst) {
                         return None;
+                    }
+
+                    // Handle ESC key to stop recording (emergency stop - idempotent)
+                    if matches!(event_type, CGEventType::KeyDown) {
+                        let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
+
+                        if keycode == KEYCODE_ESC {
+                            // Check if currently recording (ESC only stops recording, not transcription)
+                            let is_recording = {
+                                if let Ok(state_guard) = state.lock() {
+                                    state_guard.is_recording
+                                } else {
+                                    false
+                                }
+                            };
+
+                            if is_recording {
+                                log::info!("ESC key pressed - stopping recording");
+                                let state_ref = app.state::<SharedAppState>();
+                                // Use stop_recording_with_app (idempotent) instead of toggle
+                                match crate::state::stop_recording_with_app(&app, &state_ref) {
+                                    Ok(_) => {
+                                        log::info!("Recording stopped via ESC key");
+                                    }
+                                    Err(e) => {
+                                        log::error!("Failed to stop recording: {}", e);
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     // Handle FlagsChanged event (modifier key press/release)
