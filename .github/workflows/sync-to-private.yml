@@ -13,33 +13,44 @@ jobs:
       - name: Checkout public repo
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          persist-credentials: false
+          path: public
 
-      - name: Push to private repo
-        env:
-          REPO_SYNC_TOKEN: ${{ secrets.REPO_SYNC_TOKEN }}
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: team-attention/nobs-whisper-dev
+          token: ${{ secrets.REPO_SYNC_TOKEN }}
+          path: private
+
+      - name: Sync changes to private
         run: |
-          # Configure git
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          cd private
 
-          # Set up auth header for github.com
-          git config --global http.https://github.com/.extraheader "Authorization: Basic $(echo -n "x-access-token:${REPO_SYNC_TOKEN}" | base64)"
+          # Get commit info from public repo
+          ORIGINAL_MSG=$(cd ../public && git log -1 --pretty=%B)
+          ORIGINAL_AUTHOR=$(cd ../public && git log -1 --pretty="%an")
+          ORIGINAL_EMAIL=$(cd ../public && git log -1 --pretty="%ae")
 
-          # Add private repo as remote
-          git remote add private https://github.com/team-attention/nobs-whisper-dev.git
+          git config user.name "$ORIGINAL_AUTHOR"
+          git config user.email "$ORIGINAL_EMAIL"
 
-          # Fetch private repo to check for conflicts
-          git fetch private main
+          # Sync files from public to private (exclude private-only files)
+          rsync -av --delete \
+            --exclude='.git' \
+            --exclude='.spets' \
+            --exclude='.siat' \
+            --exclude='CLAUDE.md' \
+            --exclude='.github/workflows/mirror-to-public.yml' \
+            --exclude='.github/workflows/spets.yml' \
+            --exclude='.github/ISSUE_TEMPLATE/spets-task.yml' \
+            ../public/ ./
 
-          # Check if we can fast-forward (no conflicts)
-          if git merge-base --is-ancestor private/main HEAD; then
-            echo "Clean fast-forward possible, pushing to private repo..."
-            git push private HEAD:main
-            echo "✅ Successfully synced to private repo"
+          git add -A
+
+          if git diff --staged --quiet; then
+            echo "No changes to sync"
           else
-            echo "⚠️ Cannot fast-forward - private repo has diverged from public"
-            echo "Manual intervention required to resolve conflicts"
-            exit 1
+            git commit -m "$ORIGINAL_MSG"
+            git push
+            echo "✅ Successfully synced to private repo"
           fi
