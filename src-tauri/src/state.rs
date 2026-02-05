@@ -777,7 +777,7 @@ pub fn stop_recording_with_app(
             return;
         }
 
-        log::info!("Final combined transcription: {}", final_text);
+        log::debug!("Final combined transcription completed");
 
         // Update state
         if let Ok(mut state_guard) = state_clone.lock() {
