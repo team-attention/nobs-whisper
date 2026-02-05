@@ -752,7 +752,7 @@ pub fn stop_recording_with_app(
                     match whisper.transcribe(&audio, language_ref, vocabulary_ref) {
                         Ok(text) => {
                             if !text.is_empty() {
-                                log::info!("Remaining audio transcription: {}", text);
+                    log::debug!("Remaining audio transcription completed");
                                 all_results.push(text);
                             }
                         }
