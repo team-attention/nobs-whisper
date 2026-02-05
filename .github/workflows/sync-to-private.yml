@@ -1,0 +1,41 @@
+name: Sync to Private
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  sync-to-private:
+    # Only run on public repo, not on private
+    if: github.repository == 'team-attention/nobs-whisper'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout public repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push to private repo
+        env:
+          REPO_SYNC_TOKEN: ${{ secrets.REPO_SYNC_TOKEN }}
+        run: |
+          # Configure git
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Add private repo as remote
+          git remote add private https://x-access-token:${REPO_SYNC_TOKEN}@github.com/team-attention/nobs-whisper-dev.git
+
+          # Fetch private repo to check for conflicts
+          git fetch private main
+
+          # Check if we can fast-forward (no conflicts)
+          if git merge-base --is-ancestor private/main HEAD; then
+            echo "Clean fast-forward possible, pushing to private repo..."
+            git push private HEAD:main
+            echo "✅ Successfully synced to private repo"
+          else
+            echo "⚠️ Cannot fast-forward - private repo has diverged from public"
+            echo "Manual intervention required to resolve conflicts"
+            exit 1
+          fi
