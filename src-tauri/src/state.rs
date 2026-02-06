@@ -839,3 +839,46 @@ pub fn toggle_recording_with_app(
         start_recording_with_app(app, state)
     }
 }
+
+/// Cancel recording without transcription (emergency stop via ESC key)
+pub fn cancel_recording_with_app(
+    app: &AppHandle,
+    state: &SharedAppState,
+) -> Result<AppStateSnapshot, String> {
+    let mut state_guard = state.lock().map_err(|e| e.to_string())?;
+
+    // Not recording - ignore (idempotent)
+    if !state_guard.is_recording {
+        log::info!("cancel_recording_with_app called but not recording - no-op");
+        return Ok(state_guard.snapshot());
+    }
+
+    // Cancel recording
+    log::info!("Cancelling recording (no transcription)...");
+    state_guard.is_recording = false;
+    state_guard.is_transcribing = false;
+
+    // Signal recording thread to stop
+    if let Some(sender) = state_guard.recording_state.stop_sender.take() {
+        let _ = sender.send(());
+    }
+
+    // Clean up transcription thread without waiting for results
+    // (this also drops chunk_sender to stop the transcription worker)
+    state_guard.recording_state.cleanup_transcription_thread();
+
+    // Clear the audio buffer
+    state_guard.recording_state.audio_buffer = None;
+
+    // Clear any streaming results
+    state_guard.recording_state.transcription_results = Arc::new(StdMutex::new(Vec::new()));
+
+    let snapshot = state_guard.snapshot();
+    drop(state_guard);
+
+    // Emit state change and hide indicator
+    emit_state_change(app, &snapshot);
+    log::info!("Recording cancelled via ESC key");
+
+    Ok(snapshot)
+}

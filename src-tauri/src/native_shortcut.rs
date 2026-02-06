@@ -286,7 +286,7 @@ pub fn start_native_listener(app: AppHandle, state: SharedAppState) {
                         let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
 
                         if keycode == KEYCODE_ESC {
-                            // Check if currently recording (ESC only stops recording, not transcription)
+                            // Check if currently recording (ESC cancels recording without transcription)
                             let is_recording = {
                                 if let Ok(state_guard) = state.lock() {
                                     state_guard.is_recording
@@ -296,15 +296,15 @@ pub fn start_native_listener(app: AppHandle, state: SharedAppState) {
                             };
 
                             if is_recording {
-                                log::info!("ESC key pressed - stopping recording");
+                                log::info!("ESC key pressed - cancelling recording (no transcription)");
                                 let state_ref = app.state::<SharedAppState>();
-                                // Use stop_recording_with_app (idempotent) instead of toggle
-                                match crate::state::stop_recording_with_app(&app, &state_ref) {
+                                // Use cancel_recording_with_app to stop without transcription
+                                match crate::state::cancel_recording_with_app(&app, &state_ref) {
                                     Ok(_) => {
-                                        log::info!("Recording stopped via ESC key");
+                                        log::info!("Recording cancelled via ESC key");
                                     }
                                     Err(e) => {
-                                        log::error!("Failed to stop recording: {}", e);
+                                        log::error!("Failed to cancel recording: {}", e);
                                     }
                                 }
                             }
