@@ -117,6 +117,12 @@ impl WhisperEngine {
         params.set_no_context(false);
         params.set_single_segment(false);
 
+        // Suppress hallucinations (e.g. "Thank you for watching!" from YouTube training data)
+        params.set_suppress_blank(true);
+        params.set_no_speech_thold(0.6);
+        params.set_entropy_thold(2.4);
+        params.set_logprob_thold(-1.0);
+
         // Run transcription
         state
             .full(params, audio)
@@ -135,6 +141,7 @@ impl WhisperEngine {
         }
 
         let result = result.trim().to_string();
+        let result = filter_hallucinations(&result);
         log::info!("Transcription complete: {} characters", result.len());
 
         Ok(result)
@@ -190,6 +197,68 @@ impl WhisperEngine {
     }
 }
 
+/// Known Whisper hallucination phrases (from YouTube training data).
+/// These appear during silence or low-energy audio segments.
+const HALLUCINATION_PHRASES: &[&str] = &[
+    "thank you for watching",
+    "thanks for watching",
+    "thank you for listening",
+    "thanks for listening",
+    "subscribe to my channel",
+    "please subscribe",
+    "like and subscribe",
+    "see you in the next video",
+    "see you next time",
+    "please like and subscribe",
+    "don't forget to subscribe",
+    "hit the bell",
+    "leave a comment",
+    "check out my other videos",
+    "thanks for tuning in",
+    // Korean equivalents
+    "시청해 주셔서 감사합니다",
+    "구독과 좋아요",
+    "구독 부탁드립니다",
+    // Japanese equivalents
+    "ご視聴ありがとうございました",
+    // Chinese equivalents
+    "感谢收看",
+    "谢谢观看",
+    // Common short hallucinations
+    "you",
+    "MBC 뉴스 이덕영입니다",
+];
+
+/// Filter out known Whisper hallucination phrases from transcription output.
+fn filter_hallucinations(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    // Discard output that is only punctuation/symbols (e.g. "...", "♪", "...")
+    if trimmed.chars().all(|c| c.is_ascii_punctuation() || matches!(c, '…' | '♪' | '\u{266B}' | '\u{266C}')) {
+        log::info!("Filtered punctuation-only hallucination: {:?}", trimmed);
+        return String::new();
+    }
+
+    let lower = trimmed.to_lowercase();
+
+    // If the entire output is a known hallucination phrase, discard it
+    for phrase in HALLUCINATION_PHRASES {
+        let pattern = phrase.to_lowercase();
+        // Exact match (ignoring trailing punctuation like .!?)
+        let stripped = lower
+            .trim_end_matches(|c: char| c.is_ascii_punctuation() || matches!(c, '…' | '♪'));
+        if stripped == pattern {
+            log::info!("Filtered hallucination: {:?}", trimmed);
+            return String::new();
+        }
+    }
+
+    trimmed.to_string()
+}
+
 impl Default for WhisperEngine {
     fn default() -> Self {
         Self::new()
@@ -211,5 +280,27 @@ mod tests {
         let engine = WhisperEngine::new();
         let result = engine.transcribe(&[0.0; 16000], None, None, None);
         assert!(matches!(result, Err(WhisperError::NoModel)));
+    }
+
+    #[test]
+    fn test_filter_hallucinations() {
+        // Known hallucinations should be filtered
+        assert_eq!(filter_hallucinations("Thank you for watching!"), "");
+        assert_eq!(filter_hallucinations("thanks for watching."), "");
+        assert_eq!(filter_hallucinations("Thank you for watching"), "");
+        assert_eq!(filter_hallucinations("Subscribe to my channel"), "");
+        assert_eq!(filter_hallucinations("you"), "");
+        assert_eq!(filter_hallucinations("..."), "");
+        assert_eq!(filter_hallucinations("시청해 주셔서 감사합니다"), "");
+
+        // Real content should pass through
+        assert_eq!(
+            filter_hallucinations("Hello, this is a real sentence."),
+            "Hello, this is a real sentence."
+        );
+        assert_eq!(
+            filter_hallucinations("Thank you for watching the demo, now let me explain"),
+            "Thank you for watching the demo, now let me explain"
+        );
     }
 }
