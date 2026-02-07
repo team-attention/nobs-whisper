@@ -599,7 +599,9 @@ pub fn start_recording_with_app(
                             // Check for silence boundary and dispatch chunk for streaming transcription
                             if let Some(chunk) = buf.take_chunk_at_silence() {
                                 log::info!("Silence detected - dispatching chunk for background transcription");
-                                // Send chunk to transcription worker (non-blocking)
+                                let _ = chunk_sender.send(chunk);
+                            } else if let Some(chunk) = buf.take_forced_chunk() {
+                                log::info!("Forced chunk dispatch - buffer exceeded max duration");
                                 let _ = chunk_sender.send(chunk);
                             }
                         },
@@ -742,25 +744,50 @@ pub fn stop_recording_with_app(
             None
         };
 
-        // Transcribe remaining audio (single chunk - no further splitting needed)
+        // Transcribe remaining audio
         if let Some(audio) = remaining_audio {
             if audio.len() > 1600 {
                 // At least 0.1 second at 16kHz
                 if let Some(ref whisper) = whisper_opt {
                     let language_ref = language_owned.as_deref();
                     let vocabulary_ref = vocabulary_owned.as_deref();
+                    let remaining_duration_s = audio.len() as f32 / 16000.0;
+                    log::info!("Transcribing remaining {:.1}s audio", remaining_duration_s);
 
-                    let prev_context = all_results.last().map(String::as_str);
-                    log::info!("Transcribing remaining {:.1}s audio", audio.len() as f32 / 16000.0);
-                    match whisper.transcribe(&audio, language_ref, vocabulary_ref, prev_context) {
-                        Ok(text) => {
-                            if !text.is_empty() {
-                    log::debug!("Remaining audio transcription completed");
-                                all_results.push(text);
+                    // If remaining audio > 30s, split at silence boundaries
+                    let whisper_max_samples = 30 * 16000;
+                    if audio.len() > whisper_max_samples {
+                        log::info!("Remaining audio exceeds 30s - splitting at silence boundaries");
+                        let boundaries = audio::find_silence_boundaries(&audio, 16000);
+                        let chunks = audio::split_at_silences(&audio, &boundaries);
+                        log::info!("Split remaining audio into {} chunks", chunks.len());
+
+                        for (i, chunk) in chunks.iter().enumerate() {
+                            let prev_context = all_results.last().map(String::as_str);
+                            match whisper.transcribe(chunk, language_ref, vocabulary_ref, prev_context) {
+                                Ok(text) => {
+                                    if !text.is_empty() {
+                                        log::info!("Remaining chunk {}/{} transcribed", i + 1, chunks.len());
+                                        all_results.push(text);
+                                    }
+                                }
+                                Err(e) => {
+                                    log::error!("Failed to transcribe remaining chunk {}: {}", i + 1, e);
+                                }
                             }
                         }
-                        Err(e) => {
-                            log::error!("Failed to transcribe remaining audio: {}", e);
+                    } else {
+                        let prev_context = all_results.last().map(String::as_str);
+                        match whisper.transcribe(&audio, language_ref, vocabulary_ref, prev_context) {
+                            Ok(text) => {
+                                if !text.is_empty() {
+                                    log::debug!("Remaining audio transcription completed");
+                                    all_results.push(text);
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("Failed to transcribe remaining audio: {}", e);
+                            }
                         }
                     }
                 }

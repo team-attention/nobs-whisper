@@ -6,6 +6,10 @@ use thiserror::Error;
 
 const WHISPER_SAMPLE_RATE: u32 = 16000;
 
+/// Maximum buffer duration in seconds before forcing a chunk split
+/// Prevents Whisper's 30s window from truncating long continuous speech
+const MAX_BUFFER_DURATION_S: u32 = 25;
+
 /// Overlap duration in milliseconds for chunk boundaries
 /// This prevents word cutting at chunk edges by including some audio from the previous chunk
 const CHUNK_OVERLAP_MS: u32 = 200;
@@ -146,6 +150,75 @@ impl AudioBuffer {
             CHUNK_OVERLAP_MS,
             self.samples.len() as f32 / self.sample_rate as f32,
             self.noise_floor
+        );
+
+        Some(chunk)
+    }
+
+    /// Force a chunk split when buffer exceeds MAX_BUFFER_DURATION_S
+    /// Finds the quietest 20ms window in the last 5 seconds and splits there
+    /// This prevents Whisper from truncating long continuous speech
+    pub fn take_forced_chunk(&mut self) -> Option<Vec<f32>> {
+        let max_samples = (self.sample_rate * MAX_BUFFER_DURATION_S) as usize;
+        if self.samples.len() <= max_samples {
+            return None;
+        }
+
+        // Search the last 5 seconds for the quietest 20ms window
+        let search_duration_samples = (self.sample_rate * 5) as usize;
+        let window_size = (self.sample_rate / 50) as usize; // 20ms window
+        let search_start = self.samples.len().saturating_sub(search_duration_samples);
+
+        let mut quietest_pos = search_start;
+        let mut quietest_rms = f32::MAX;
+
+        let mut pos = search_start;
+        while pos + window_size <= self.samples.len() {
+            let rms = calculate_rms(&self.samples[pos..pos + window_size]);
+            if rms < quietest_rms {
+                quietest_rms = rms;
+                quietest_pos = pos;
+            }
+            pos += window_size;
+        }
+
+        // Split at the middle of the quietest window
+        let split_point = (quietest_pos + window_size / 2).min(self.samples.len());
+
+        // Only take if we have meaningful content
+        let min_chunk_samples = (self.sample_rate / 2) as usize;
+        if split_point < min_chunk_samples {
+            return None;
+        }
+
+        // Calculate overlap size
+        let overlap_samples = (self.sample_rate * CHUNK_OVERLAP_MS / 1000) as usize;
+
+        // Create chunk with overlap from previous chunk prepended
+        let mut chunk = Vec::with_capacity(self.overlap_buffer.len() + split_point);
+        chunk.extend_from_slice(&self.overlap_buffer);
+        chunk.extend_from_slice(&self.samples[..split_point]);
+
+        // Save overlap for next chunk
+        self.overlap_buffer.clear();
+        let overlap_start = split_point.saturating_sub(overlap_samples);
+        self.overlap_buffer.extend_from_slice(&self.samples[overlap_start..split_point]);
+
+        // Remove processed samples from buffer
+        self.samples.drain(..split_point);
+
+        // Reset speech position relative to remaining samples
+        if self.last_speech_pos > split_point {
+            self.last_speech_pos -= split_point;
+        } else {
+            self.last_speech_pos = 0;
+        }
+
+        log::info!(
+            "Forced chunk split at quietest point (RMS={:.4}): {:.1}s chunk, remaining buffer: {:.1}s",
+            quietest_rms,
+            chunk.len() as f32 / self.sample_rate as f32,
+            self.samples.len() as f32 / self.sample_rate as f32,
         );
 
         Some(chunk)
