@@ -68,8 +68,9 @@ impl WhisperEngine {
         audio: &[f32],
         language: Option<&str>,
         vocabulary: Option<&str>,
+        context: Option<&str>,
     ) -> Result<String, WhisperError> {
-        let context = self.context.as_ref().ok_or(WhisperError::NoModel)?;
+        let whisper_ctx = self.context.as_ref().ok_or(WhisperError::NoModel)?;
 
         log::info!(
             "Transcribing {} samples (~{:.1}s), language: {:?}",
@@ -79,7 +80,7 @@ impl WhisperEngine {
         );
 
         // Create state for this transcription
-        let mut state = context
+        let mut state = whisper_ctx
             .create_state()
             .map_err(|e| WhisperError::TranscriptionError(e.to_string()))?;
 
@@ -93,12 +94,18 @@ impl WhisperEngine {
             params.set_language(None); // Auto-detect
         }
 
-        // Set custom vocabulary as initial prompt to help recognize specific terms
-        if let Some(vocab) = vocabulary {
-            if !vocab.is_empty() {
-                params.set_initial_prompt(vocab);
-                log::debug!("Using custom vocabulary prompt");
+        // Build initial prompt from custom vocabulary and previous transcription context
+        let initial_prompt = match (vocabulary, context) {
+            (Some(vocab), Some(ctx)) if !vocab.is_empty() => {
+                Some(format!("{} {}", vocab, ctx))
             }
+            (Some(vocab), None) if !vocab.is_empty() => Some(vocab.to_string()),
+            (_, Some(ctx)) => Some(ctx.to_string()),
+            _ => None,
+        };
+        if let Some(ref prompt) = initial_prompt {
+            params.set_initial_prompt(prompt);
+            log::debug!("Using initial prompt ({} chars)", prompt.len());
         }
 
         // Disable various features for faster inference
@@ -107,7 +114,7 @@ impl WhisperEngine {
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
         params.set_translate(false);
-        params.set_no_context(true);
+        params.set_no_context(false);
         params.set_single_segment(false);
 
         // Run transcription
@@ -148,6 +155,7 @@ impl WhisperEngine {
         );
 
         let mut results = Vec::new();
+        let mut last_context: Option<String> = None;
 
         for (i, chunk) in chunks.iter().enumerate() {
             log::info!(
@@ -157,9 +165,10 @@ impl WhisperEngine {
                 chunk.len() as f32 / 16000.0
             );
 
-            match self.transcribe(chunk, language, vocabulary) {
+            match self.transcribe(chunk, language, vocabulary, last_context.as_deref()) {
                 Ok(text) => {
                     if !text.is_empty() {
+                        last_context = Some(text.clone());
                         results.push(text);
                     }
                 }
@@ -200,7 +209,7 @@ mod tests {
     #[test]
     fn test_transcribe_without_model() {
         let engine = WhisperEngine::new();
-        let result = engine.transcribe(&[0.0; 16000], None, None);
+        let result = engine.transcribe(&[0.0; 16000], None, None, None);
         assert!(matches!(result, Err(WhisperError::NoModel)));
     }
 }

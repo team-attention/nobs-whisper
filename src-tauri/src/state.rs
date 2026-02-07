@@ -122,6 +122,7 @@ fn spawn_transcription_worker(
     std::thread::spawn(move || {
         log::info!("Transcription worker started");
         let mut chunk_count = 0;
+        let mut last_context: Option<String> = None;
 
         while let Ok(chunk) = receiver.recv() {
             chunk_count += 1;
@@ -140,13 +141,14 @@ fn spawn_transcription_worker(
                 }
             };
 
-            // Transcribe
+            // Transcribe with context from previous chunk for continuity
             let language_ref = language.as_deref();
             let vocabulary_ref = vocabulary.as_deref();
-            match whisper.transcribe(&resampled, language_ref, vocabulary_ref) {
+            match whisper.transcribe(&resampled, language_ref, vocabulary_ref, last_context.as_deref()) {
                 Ok(text) => {
                     if !text.is_empty() {
                         log::info!("Chunk {} transcribed: {}", chunk_count, text);
+                        last_context = Some(text.clone());
                         if let Ok(mut r) = results.lock() {
                             r.push(text);
                         }
@@ -284,7 +286,7 @@ pub fn toggle_recording(
                     let language_ref = language_owned.as_deref();
                     let vocabulary_ref = vocabulary_owned.as_deref();
 
-                    match whisper.transcribe(&audio, language_ref, vocabulary_ref) {
+                    match whisper.transcribe(&audio, language_ref, vocabulary_ref, None) {
                         Ok(text) => {
                             log::info!("Transcription: {}", text);
 
@@ -748,8 +750,9 @@ pub fn stop_recording_with_app(
                     let language_ref = language_owned.as_deref();
                     let vocabulary_ref = vocabulary_owned.as_deref();
 
+                    let prev_context = all_results.last().map(String::as_str);
                     log::info!("Transcribing remaining {:.1}s audio", audio.len() as f32 / 16000.0);
-                    match whisper.transcribe(&audio, language_ref, vocabulary_ref) {
+                    match whisper.transcribe(&audio, language_ref, vocabulary_ref, prev_context) {
                         Ok(text) => {
                             if !text.is_empty() {
                     log::debug!("Remaining audio transcription completed");
